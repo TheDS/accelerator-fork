@@ -344,8 +344,7 @@ void CPUFillFromThreadInfo(MDRawContextARM* out,
 #endif
 }
 
-void CPUFillFromUContext(MDRawContextARM* out, const ucontext* uc,
-                         const struct _libc_fpstate* fpregs) {
+void CPUFillFromUContext(MDRawContextARM* out, const ucontext* uc) {
   out->context_flags = MD_CONTEXT_ARM_FULL;
 
   out->iregs[0] = uc->uc_mcontext.arm_r0;
@@ -372,6 +371,105 @@ void CPUFillFromUContext(MDRawContextARM* out, const ucontext* uc,
   out->float_save.fpscr = 0;
   my_memset(&out->float_save.regs, 0, sizeof(out->float_save.regs));
   my_memset(&out->float_save.extra, 0, sizeof(out->float_save.extra));
+}
+
+#elif defined(__aarch64__)
+typedef MDRawContextARM64 RawContextCPU;
+
+void CPUFillFromThreadInfo(MDRawContextARM64* out,
+                           const google_breakpad::ThreadInfo& info) {
+  out->context_flags = MD_CONTEXT_ARM64_FULL;
+
+  out->cpsr = static_cast<uint32_t>(info.regs.pstate);
+  for (int i = 0; i < MD_CONTEXT_ARM64_REG_SP; ++i)
+    out->iregs[i] = info.regs.regs[i];
+  out->iregs[MD_CONTEXT_ARM64_REG_SP] = info.regs.sp;
+  out->iregs[MD_CONTEXT_ARM64_REG_PC] = info.regs.pc;
+
+  out->float_save.fpsr = info.fpregs.fpsr;
+  out->float_save.fpcr = info.fpregs.fpcr;
+  my_memcpy(&out->float_save.regs, &info.fpregs.vregs,
+      MD_FLOATINGSAVEAREA_ARM64_FPR_COUNT * 16);
+}
+
+void CPUFillFromUContext(MDRawContextARM64* out, const ucontext* uc,
+                         const struct fpsimd_context* fpregs) {
+  out->context_flags = MD_CONTEXT_ARM64_FULL;
+
+  out->cpsr = static_cast<uint32_t>(uc->uc_mcontext.pstate);
+  for (int i = 0; i < MD_CONTEXT_ARM64_REG_SP; ++i)
+    out->iregs[i] = uc->uc_mcontext.regs[i];
+  out->iregs[MD_CONTEXT_ARM64_REG_SP] = uc->uc_mcontext.sp;
+  out->iregs[MD_CONTEXT_ARM64_REG_PC] = uc->uc_mcontext.pc;
+
+  out->float_save.fpsr = fpregs->fpsr;
+  out->float_save.fpcr = fpregs->fpcr;
+  my_memcpy(&out->float_save.regs, &fpregs->vregs,
+      MD_FLOATINGSAVEAREA_ARM64_FPR_COUNT * 16);
+}
+
+#elif defined(__mips__)
+typedef MDRawContextMIPS RawContextCPU;
+
+static void CPUFillFromThreadInfo(MDRawContextMIPS* out,
+                                  const google_breakpad::ThreadInfo& info) {
+  out->context_flags = MD_CONTEXT_MIPS_FULL;
+
+  for (int i = 0; i < MD_CONTEXT_MIPS_GPR_COUNT; ++i)
+    out->iregs[i] = info.regs.regs[i];
+
+  out->mdhi = info.regs.hi;
+  out->mdlo = info.regs.lo;
+
+  for (int i = 0; i < MD_CONTEXT_MIPS_DSP_COUNT; ++i) {
+    out->hi[i] = info.hi[i];
+    out->lo[i] = info.lo[i];
+  }
+  out->dsp_control = info.dsp_control;
+
+  out->epc = info.regs.epc;
+  out->badvaddr = info.regs.badvaddr;
+  out->status = info.regs.status;
+  out->cause = info.regs.cause;
+
+  for (int i = 0; i < MD_FLOATINGSAVEAREA_MIPS_FPR_COUNT; ++i)
+    out->float_save.regs[i] = info.fpregs.regs[i];
+
+  out->float_save.fpcsr = info.fpregs.fpcsr;
+  out->float_save.fir = info.fpregs.fir;
+}
+
+static void CPUFillFromUContext(MDRawContextMIPS* out, const ucontext* uc) {
+  out->context_flags = MD_CONTEXT_MIPS_FULL;
+
+  for (int i = 0; i < MD_CONTEXT_MIPS_GPR_COUNT; ++i)
+    out->iregs[i] = uc->uc_mcontext.gregs[i];
+
+  out->mdhi = uc->uc_mcontext.mdhi;
+  out->mdlo = uc->uc_mcontext.mdlo;
+
+  out->hi[0] = uc->uc_mcontext.hi1;
+  out->hi[1] = uc->uc_mcontext.hi2;
+  out->hi[2] = uc->uc_mcontext.hi3;
+  out->lo[0] = uc->uc_mcontext.lo1;
+  out->lo[1] = uc->uc_mcontext.lo2;
+  out->lo[2] = uc->uc_mcontext.lo3;
+  out->dsp_control = uc->uc_mcontext.dsp;
+
+  out->epc = uc->uc_mcontext.pc;
+  out->badvaddr = 0;  // Not reported in signal context.
+  out->status = 0;  // Not reported in signal context.
+  out->cause = 0;  // Not reported in signal context.
+
+  for (int i = 0; i < MD_FLOATINGSAVEAREA_MIPS_FPR_COUNT; ++i)
+#if defined (__ANDROID__)
+    out->float_save.regs[i] = uc->uc_mcontext.fpregs[i];
+#else
+    out->float_save.regs[i] = uc->uc_mcontext.fpregs.fp_r.fp_dregs[i];
+#endif
+
+  out->float_save.fpcsr = uc->uc_mcontext.fpc_csr;
+  out->float_save.fir = uc->uc_mcontext.fpc_eir;  // Unused.
 }
 
 #else
@@ -405,11 +503,8 @@ class MinidumpWriter {
       : fd_(minidump_fd),
         path_(minidump_path),
         ucontext_(context ? &context->context : NULL),
-#if !defined(__ARM_EABI__)
+#if !defined(__ARM_EABI__) && !defined(__mips__)
         float_state_(context ? &context->float_state : NULL),
-#else
-        // TODO: fix this after fixing ExceptionHandler
-        float_state_(NULL),
 #endif
         dumper_(dumper),
         minidump_size_limit_(-1),
@@ -770,7 +865,11 @@ class MinidumpWriter {
         if (!cpu.Allocate())
           return false;
         my_memset(cpu.get(), 0, sizeof(RawContextCPU));
+#if !defined(__ARM_EABI__) && !defined(__mips__)
         CPUFillFromUContext(cpu.get(), ucontext_, float_state_);
+#else
+        CPUFillFromUContext(cpu.get(), ucontext_);
+#endif
         if (stack_copy)
           PopSeccompStackFrame(cpu.get(), thread, stack_copy);
         thread.thread_context = cpu.location();
@@ -1127,8 +1226,8 @@ class MinidumpWriter {
           return false;
         MDRawLinkMap entry;
         entry.name = location.rva;
-        entry.addr = (void*)map.l_addr;
-        entry.ld = (void*)map.l_ld;
+        entry.addr = reinterpret_cast<void*>(map.l_addr);
+        entry.ld = reinterpret_cast<void*>(map.l_ld);
         linkmap.CopyIndex(idx++, &entry);
       }
     }
@@ -1144,11 +1243,14 @@ class MinidumpWriter {
     debug.get()->version = debug_entry.r_version;
     debug.get()->map = linkmap_rva;
     debug.get()->dso_count = dso_count;
-    debug.get()->brk = (void*)debug_entry.r_brk;
-    debug.get()->ldbase = (void*)debug_entry.r_ldbase;
+    debug.get()->brk = reinterpret_cast<void*>(debug_entry.r_brk);
+    debug.get()->ldbase = reinterpret_cast<void*>(debug_entry.r_ldbase);
     debug.get()->dynamic = dynamic;
 
     wasteful_vector<char> dso_debug_data(dumper_->allocator(), dynamic_length);
+    // The passed-in size to the constructor (above) is only a hint.
+    // Must call .resize() to do actual initialization of the elements.
+    dso_debug_data.resize(dynamic_length);
     dumper_->CopyFromProcess(&dso_debug_data[0], GetCrashThread(), dynamic,
                              dynamic_length);
     debug.CopyIndexAfterObject(0, &dso_debug_data[0], dynamic_length);
@@ -1203,6 +1305,30 @@ class MinidumpWriter {
   uintptr_t GetInstructionPointer(const ThreadInfo& info) {
     return info.regs.uregs[15];
   }
+#elif defined(__aarch64__)
+  uintptr_t GetStackPointer() {
+    return ucontext_->uc_mcontext.sp;
+  }
+
+  uintptr_t GetInstructionPointer() {
+    return ucontext_->uc_mcontext.pc;
+  }
+
+  uintptr_t GetInstructionPointer(const ThreadInfo& info) {
+    return info.regs.pc;
+  }
+#elif defined(__mips__)
+  uintptr_t GetStackPointer() {
+    return ucontext_->uc_mcontext.gregs[MD_CONTEXT_MIPS_REG_SP];
+  }
+
+  uintptr_t GetInstructionPointer() {
+    return ucontext_->uc_mcontext.pc;
+  }
+
+  uintptr_t GetInstructionPointer(const ThreadInfo& info) {
+    return info.regs.epc;
+  }
 #else
 #error "This code has not been ported to your platform yet."
 #endif
@@ -1213,7 +1339,7 @@ class MinidumpWriter {
     dirent->location.rva = 0;
   }
 
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__mips__)
   bool WriteCPUInformation(MDRawSystemInfo* sys_info) {
     char vendor_id[sizeof(sys_info->cpu.x86_cpu_info.vendor_id) + 1] = {0};
     static const char vendor_id_name[] = "vendor_id";
@@ -1224,14 +1350,18 @@ class MinidumpWriter {
       bool found;
     } cpu_info_table[] = {
       { "processor", -1, false },
+#if defined(__i386__) || defined(__x86_64__)
       { "model", 0, false },
       { "stepping",  0, false },
       { "cpu family", 0, false },
+#endif
     };
 
     // processor_architecture should always be set, do this first
     sys_info->processor_architecture =
-#if defined(__i386__)
+#if defined(__mips__)
+        MD_CPU_ARCHITECTURE_MIPS;
+#elif defined(__i386__)
         MD_CPU_ARCHITECTURE_X86;
 #else
         MD_CPU_ARCHITECTURE_AMD64;
@@ -1294,9 +1424,11 @@ class MinidumpWriter {
     cpu_info_table[0].value++;
 
     sys_info->number_of_processors = cpu_info_table[0].value;
+#if defined(__i386__) || defined(__x86_64__)
     sys_info->processor_level      = cpu_info_table[3].value;
     sys_info->processor_revision   = cpu_info_table[1].value << 8 |
                                      cpu_info_table[2].value;
+#endif
 
     if (vendor_id[0] != '\0') {
       my_memcpy(sys_info->cpu.x86_cpu_info.vendor_id, vendor_id,
@@ -1304,7 +1436,7 @@ class MinidumpWriter {
     }
     return true;
   }
-#elif defined(__arm__)
+#elif defined(__arm__) || defined(__aarch64__)
   bool WriteCPUInformation(MDRawSystemInfo* sys_info) {
     // The CPUID value is broken up in several entries in /proc/cpuinfo.
     // This table is used to rebuild it from the entries.
@@ -1326,6 +1458,7 @@ class MinidumpWriter {
       const char* tag;
       uint32_t hwcaps;
     } cpu_features_entries[] = {
+#if defined(__arm__)
       { "swp",  MD_CPU_ARM_ELF_HWCAP_SWP },
       { "half", MD_CPU_ARM_ELF_HWCAP_HALF },
       { "thumb", MD_CPU_ARM_ELF_HWCAP_THUMB },
@@ -1346,10 +1479,18 @@ class MinidumpWriter {
       { "idiva", MD_CPU_ARM_ELF_HWCAP_IDIVA },
       { "idivt", MD_CPU_ARM_ELF_HWCAP_IDIVT },
       { "idiv", MD_CPU_ARM_ELF_HWCAP_IDIVA | MD_CPU_ARM_ELF_HWCAP_IDIVT },
+#elif defined(__aarch64__)
+      // No hwcaps on aarch64.
+#endif
     };
 
     // processor_architecture should always be set, do this first
-    sys_info->processor_architecture = MD_CPU_ARCHITECTURE_ARM;
+    sys_info->processor_architecture =
+#if defined(__aarch64__)
+        MD_CPU_ARCHITECTURE_ARM64;
+#else
+        MD_CPU_ARCHITECTURE_ARM;
+#endif
 
     // /proc/cpuinfo is not readable under various sandboxed environments
     // (e.g. Android services with the android:isolatedProcess attribute)
@@ -1420,10 +1561,11 @@ class MinidumpWriter {
           const char* p = value;
           if (value[0] == '0' && value[1] == 'x') {
             p = my_read_hex_ptr(&result, value+2);
-          } else if (entry->format == 'x')
+          } else if (entry->format == 'x') {
             p = my_read_hex_ptr(&result, value);
-          else
+          } else {
             p = my_read_decimal_ptr(&result, value);
+          }
           if (p == value)
             continue;
 
@@ -1432,13 +1574,14 @@ class MinidumpWriter {
           sys_info->cpu.arm_cpu_info.cpuid |=
               static_cast<uint32_t>(result);
         }
+#if defined(__arm__)
         // Get the architecture version from the "Processor" field.
         // Note that it is also available in the "CPU architecture" field,
         // however, some existing kernels are misconfigured and will report
         // invalid values here (e.g. 6, while the CPU is ARMv7-A based).
         // The "Processor" field doesn't have this issue.
         if (!my_strcmp(field, "Processor")) {
-          unsigned value_len;
+          size_t value_len;
           const char* value = reader->GetValueAndLen(&value_len);
           // Expected format: <text> (v<level><endian>)
           // Where <text> is some text like "ARMv7 Processor rev 2"
@@ -1457,9 +1600,23 @@ class MinidumpWriter {
             sys_info->processor_level = static_cast<uint16_t>(arch_level);
           }
         }
+#elif defined(__aarch64__)
+        // The aarch64 architecture does not provide the architecture level
+        // in the Processor field, so we instead check the "CPU architecture"
+        // field.
+        if (!my_strcmp(field, "CPU architecture")) {
+          uintptr_t arch_level = 0;
+          const char* value = reader->GetValue();
+          const char* p = value;
+          p = my_read_decimal_ptr(&arch_level, value);
+          if (p == value)
+            continue;
+          sys_info->processor_level = static_cast<uint16_t>(arch_level);
+        }
+#endif
         // Rebuild the ELF hwcaps from the 'Features' field.
         if (!my_strcmp(field, "Features")) {
-          unsigned value_len;
+          size_t value_len;
           const char* value = reader->GetValueAndLen(&value_len);
 
           // Parse each space-separated tag.
@@ -1639,7 +1796,9 @@ class MinidumpWriter {
   const char* path_;  // Path to the file where the minidum should be written.
 
   const struct ucontext* const ucontext_;  // also from the signal handler
-  const struct _libc_fpstate* const float_state_;  // ditto
+#if !defined(__ARM_EABI__) && !defined(__mips__)
+  const google_breakpad::fpstate_t* const float_state_;  // ditto
+#endif
   LinuxDumper* dumper_;
   MinidumpFileWriter minidump_writer_;
   off_t minidump_size_limit_;
