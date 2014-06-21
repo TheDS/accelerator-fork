@@ -1,0 +1,64 @@
+# vim: set ts=2 sw=2 tw=99 noet ft=python: 
+import os
+import ambuild.osutil as osutil
+from ambuild.command import ShellCommand
+from ambuild.command import DirectCommand
+
+def BuildBreakpad():
+	breakpad = AMBuild.AddJob('google-breakpad')
+	setattr(SM, 'breakpadWorkFolder', breakpad.workFolder)
+
+	if AMBuild.target['platform'] == 'linux':
+		if osutil.FileExists(os.path.join(AMBuild.outputFolder, 'google-breakpad', 'src', 'client', 'linux', 'libbreakpad_client.a')):
+			return
+
+		breakpad.AddCommand(ShellCommand('CXXFLAGS=-m32 CFLAGS=-m32 CPPFLAGS=-m32 ' + os.path.join(AMBuild.sourceFolder, 'google-breakpad', 'configure')))
+		breakpad.AddCommand(ShellCommand('make src/client/linux/libbreakpad_client.a'))
+
+	elif AMBuild.target['platform'] == 'windows':
+		if osutil.FileExists(os.path.join(AMBuild.sourceFolder, 'google-breakpad', 'src', 'client', 'windows', 'handler', 'Release', 'lib', 'exception_handler.lib')):
+			return
+
+		gyp = os.path.join(AMBuild.sourceFolder, 'google-breakpad', 'src', 'tools', 'gyp', 'gyp.bat')
+		gyppath = os.path.join(AMBuild.sourceFolder, 'google-breakpad', 'src', 'client', 'windows', 'handler', 'exception_handler.gyp')
+		breakpad.AddCommand(DirectCommand([gyp, gyppath]))
+
+		slnpath = os.path.join(AMBuild.sourceFolder, 'google-breakpad', 'src', 'client', 'windows', 'handler', 'exception_handler.sln')
+		breakpad.AddCommand(DirectCommand(['msbuild', slnpath, '/p:Configuration=Release']))
+
+	elif AMBuild.target['platform'] == 'darwin':
+		srcpath = os.path.join('google-breakpad', 'src')
+		compiler = SM.DefaultCompiler()
+		compiler['CXXINCLUDES'].append(os.path.join(AMBuild.sourceFolder, srcpath))
+	
+		binary = Cpp.StaticLibraryBuilder('breakpad_client', AMBuild, breakpad, compiler)
+
+		binary.AddSourceFiles(os.path.join(srcpath, 'common'), [
+			'convert_UTF.c',
+			'md5.cc',
+			'string_conversion.cc',
+			'mac/arch_utilities.cc',
+			'mac/bootstrap_compat.cc',
+			'mac/file_id.cc',
+			'mac/macho_id.cc',
+			'mac/macho_reader.cc',
+			'mac/macho_utilities.cc',
+			'mac/macho_walker.cc',
+			'mac/string_utilities.cc',
+			'mac/MachIPC.mm',
+		])
+
+		binary.AddSourceFiles(os.path.join(srcpath, 'client'), [
+			'minidump_file_writer.cc',
+			'mac/crash_generation/crash_generation_client.cc',
+			'mac/crash_generation/crash_generation_server.cc',
+			'mac/handler/breakpad_nlist_64.cc',
+			'mac/handler/dynamic_images.cc',
+			'mac/handler/exception_handler.cc',
+			'mac/handler/minidump_generator.cc',
+		])
+
+		binary.SendToJob()
+
+BuildBreakpad()
+

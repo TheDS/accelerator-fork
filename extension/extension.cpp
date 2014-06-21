@@ -17,21 +17,26 @@
  * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "extension.h"
-
-#include <IWebternet.h>
-#include "MemoryDownloader.h"
+#if defined _LINUX || defined _OSX
+#include <signal.h>
+#include <dirent.h>
+#include <unistd.h>
 
 #if defined _LINUX
 #include "client/linux/handler/exception_handler.h"
+#else
+#include "client/mac/handler/exception_handler.h"
+#endif
 
-#include <signal.h>
-#include <dirent.h> 
-#include <unistd.h>
 #elif defined _WINDOWS
 #define _STDINT // ~.~
 #include "client/windows/handler/exception_handler.h"
 #endif
+
+#include "extension.h"
+
+#include <IWebternet.h>
+#include "MemoryDownloader.h"
 
 Accelerator g_accelerator;
 SMEXT_LINK(&g_accelerator);
@@ -42,7 +47,7 @@ static IThreadHandle *uploadThread;
 char buffer[255];
 google_breakpad::ExceptionHandler *handler = NULL;
 
-#if defined _LINUX
+#if defined _LINUX || defined _OSX
 void (*SignalHandler)(int, siginfo_t *, void *);
 
 const int kExceptionSignals[] = {
@@ -51,11 +56,19 @@ const int kExceptionSignals[] = {
 
 const int kNumHandledSignals = sizeof(kExceptionSignals) / sizeof(kExceptionSignals[0]);
 
+#if defined _LINUX
 static bool dumpCallback(const google_breakpad::MinidumpDescriptor& descriptor, void* context, bool succeeded)
 {
 	printf("Wrote minidump to: %s\n", descriptor.path());
 	return succeeded;
 }
+#else // _OSX
+static bool dumpCallback(const char *dump_dir, const char *minidump_id, void *context, bool succeeded)
+{
+	printf("Wrote minidump to: %s/%s.dmp\n", dump_dir, minidump_id);
+	return succeeded;
+}
+#endif
 
 void OnGameFrame(bool simulating)
 {
@@ -171,7 +184,7 @@ void Accelerator::OnCoreMapStart(edict_t *pEdictList, int edictCount, int client
 		g_pSM->Format(path, sizeof(path), "%s/%s", buffer, dumps->GetEntryName());
 		UploadCrashDump(path);
 		
-#if defined _LINUX
+#if defined _LINUX || defined _OSX
 		unlink(path);
 #elif defined _WINDOWS
 		_unlink(path);
@@ -200,10 +213,13 @@ bool Accelerator::SDK_OnLoad(char *error, size_t maxlength, bool late)
 		}
 	}
 
+#if defined _LINUX || defined _OSX
 #if defined _LINUX
 	google_breakpad::MinidumpDescriptor descriptor(buffer);
 	handler = new google_breakpad::ExceptionHandler(descriptor, NULL, dumpCallback, NULL, true, -1);
-
+#else
+	handler = new google_breakpad::ExceptionHandler(std::string(buffer), NULL, dumpCallback, NULL, true, NULL);
+#endif
 	struct sigaction oact;
 	sigaction(SIGSEGV, NULL, &oact);
 	SignalHandler = oact.sa_sigaction;
@@ -227,7 +243,7 @@ bool Accelerator::SDK_OnLoad(char *error, size_t maxlength, bool late)
 
 void Accelerator::SDK_OnUnload() 
 {
-#if defined _LINUX
+#if defined _LINUX || defined _OSX
 	g_pSM->RemoveGameFrameHook(OnGameFrame);
 #elif defined _WINDOWS
 	RemoveVectoredExceptionHandler(BreakpadVectoredHandler);
